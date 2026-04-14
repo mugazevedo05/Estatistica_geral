@@ -23,7 +23,7 @@ def tratar_trajetoria_gromacs(tpr_file, xtc_file, output_fit):
 
     # Passo 1.2: Centralizar a benzoquinona no meio da caixa
     print("Centralizando a benzoquinona...")
-    cmd_center = f"gmx trjconv -s {tpr_file} -f traj_whole.xtc -o traj_center.xtc -pbc mol -center"
+    cmd_center = f"gmx trjconv -s {tpr_file} -f traj_whole.xtc -o traj_center.xtc -pbc mol -center -ur compact"
     # O input b"1\n0\n" seleciona "1" (supondo que 1 seja a sua molécula) para centrar, e "0" (System) para salvar
     subprocess.run(cmd_center, shell=True, input=b"1\n0\n", check=True, stdout=subprocess.DEVNULL)
 
@@ -78,16 +78,18 @@ def extrair_campo_medio(tpr_file, traj_fit_file, pc_output, carga_O=-0.834, carg
     frames_coletados = 0
     
     # Passo 2.4: O Loop de Captura
+    quinona = u.select_atoms("resname UNK") # Define a quinona uma vez aqui fora
+
     for ts in u.trajectory[::step]:
         if frames_coletados >= num_frames:
-            break # Para o loop se já pegou as 100 fotos
+            break 
             
-        # Pega as coordenadas (X, Y, Z) exatas dos átomos neste quadro
-        # Multiplicamos por 10 porque o MDAnalysis lê em Angstroms, e o ORCA precisa disso em Angstroms (MDAnalysis nativamente usa Angstrom, GROMACS usa nm, então aqui já está correto).
-        pos_O = oxigenios.positions 
-        pos_H = hidrogenios.positions 
+        # O SEGREDO: Calcula o centro de massa e desloca todo mundo para o (0,0,0)
+        com_quinona = quinona.center_of_mass()
+        pos_O = oxigenios.positions - com_quinona
+        pos_H = hidrogenios.positions - com_quinona
         
-        # Formata os dados no padrão do ORCA: [Carga] [X] [Y] [Z]
+        # Formata os dados no padrão do ORCA
         for coord in pos_O:
             linhas_pc.append(f"{carga_frac_O:8.5f} {coord[0]:8.3f} {coord[1]:8.3f} {coord[2]:8.3f}\n")
             
@@ -106,18 +108,18 @@ def extrair_campo_medio(tpr_file, traj_fit_file, pc_output, carga_O=-0.834, carg
         
     print(f"Sucesso! Arquivo de cargas pontuais gerado: {pc_output}\n")
     
-    # NOVIDADE: Extrair as coordenadas da quinona congelada para dar para o ORCA
-    quinona = u.select_atoms("resname UNL") # Substitua QUI pelo nome da sua molécula na topologia
-    
-    # Transforma as posições em um bloco de texto formatado
+    # Extrair as coordenadas da quinona congelada e centralizada no (0,0,0)
     bloco_xyz = ""
-    for atomo in quinona:
-        # Pega o nome do elemento (ex: C, O, H) e as posições
-        bloco_xyz += f"{atomo.element:2s} {atomo.position[0]:8.5f} {atomo.position[1]:8.5f} {atomo.position[2]:8.5f}\n"
-        
-    return bloco_xyz # A função agora devolve esse texto para usarmos na Etapa 3
+    # Usamos o centro de massa do último frame para deslocar a própria quinona
+    com_quinona_final = quinona.center_of_mass() 
 
-    
+    for atomo in quinona:
+        pos_centrada = atomo.position - com_quinona_final
+        elemento = atomo.name[0].upper()
+        bloco_xyz += f"{elemento:2s} {pos_centrada[0]:8.5f} {pos_centrada[1]:8.5f} {pos_centrada[2]:8.5f}\n"
+        
+    return bloco_xyz
+
 # =============================================================================
 # ETAPA 3: GERAÇÃO DO INPUT DO ORCA
 # =============================================================================
@@ -132,17 +134,14 @@ def gerar_input_orca(inp_output, pc_file, coords_quinona, omega_val, carga=0, mu
     # Usamos f-strings (o 'f' antes das aspas) para que o Python troque 
     # as palavras entre chaves {} pelos valores reais das nossas variáveis.
     
-    conteudo_orca = f"""! wB97X def2-TZVPP TIGHTSCF RIJCOSX def2/J HIRSHFELD
+    conteudo_orca = f"""!wB97X def2-TZVPP TIGHTSCF RIJCOSX def2/J CHELPG
 
-# Aponta para a rede de solvente que extraímos do GROMACS
 %pointcharges "{pc_file}"
 
-# Configuração do Optimal Tuning
 %method
     RangeSepMu {omega_val}
 end
 
-# Coordenadas da quinona centralizada
 * xyz {carga} {multiplicidade}
 {coords_quinona}*
 """
@@ -165,8 +164,8 @@ if __name__ == "__main__":
 
     # 1. VARIÁVEIS DE ENTRADA (Mude os nomes dos arquivos aqui)
     # Coloque aqui os arquivos da sua dinâmica real que já rodou
-    arquivo_tpr = "md.tpr"               
-    arquivo_xtc = "md.xtc"               
+    arquivo_tpr = "MD.tpr"               
+    arquivo_xtc = "MD.xtc"               
     
     # 2. VARIÁVEIS DE SAÍDA (Como você quer chamar os novos arquivos)
     traj_fit_out = "traj_fit.xtc"        
